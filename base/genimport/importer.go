@@ -204,7 +204,7 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 		return ""
 	}
 
-	err := ioutil.WriteFile(filepath, buf.Bytes(), os.FileMode(0644))
+	err := ioutil.WriteFile(filepath, buf.Bytes(), os.FileMode(0o644))
 	if err != nil {
 		o.Errorf("error writing file %q: %v", filepath, err)
 	}
@@ -222,7 +222,7 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 }
 
 func createDir(o *Output, dir string) {
-	err := os.MkdirAll(dir, 0700)
+	err := os.MkdirAll(dir, 0o700)
 	if err != nil {
 		o.Errorf("error creating directory %q: %v", dir, err)
 	}
@@ -254,8 +254,9 @@ func removeAllFilesInDir(o *Output, dir string) {
 }
 
 func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
+	return "go.mod"
 	gomod := paths.Subdir(dir, "go.mod")
-	err := ioutil.WriteFile(gomod, []byte("module gomacro.imports/"+pkgpath+"\n"), os.FileMode(0644))
+	err := ioutil.WriteFile(gomod, []byte("module gomacro.imports/"+pkgpath+"\n"), os.FileMode(0o644))
 	if err != nil {
 		o.Errorf("error writing file %q: %v", gomod, err)
 	}
@@ -315,7 +316,7 @@ func computeImportDir(o *Output, pkgpath string, mode ImportMode) string {
 		o.Errorf("unable to locate package %q in $GOPATH/src ($GOPATH=%s)",
 			pkgpath, build.Default.GOPATH)
 	case ImPlugin:
-		return paths.Subdir(paths.GoSrcDir, "gomacro.imports", pkgpath)
+		return paths.Subdir(".gomacro.imports", pkgpath)
 	default:
 		o.Errorf("unknown import mode: %v", mode)
 	}

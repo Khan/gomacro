@@ -27,13 +27,6 @@ import (
 )
 
 func compilePlugin(o *Output, filePath string, enableModule bool, stdout io.Writer, stderr io.Writer) string {
-	gosrcdir := paths.GoSrcDir
-	gosrclen := len(gosrcdir)
-	filelen := len(filePath)
-	if filelen < gosrclen || filePath[0:gosrclen] != gosrcdir {
-		o.Errorf("source %q is in unsupported directory, cannot compile it: should be inside %q", filePath, gosrcdir)
-	}
-
 	gocmd := "go"
 
 	// prefer to use $GOROOT/bin/go, where $GOROOT is the Go installation that compiled gomacro
