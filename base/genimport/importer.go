@@ -23,6 +23,7 @@ import (
 	"go/types"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	r "reflect"
 
 	"github.com/cosmos72/gomacro/base/output"
@@ -204,7 +205,7 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 		return ""
 	}
 
-	err := ioutil.WriteFile(filepath, buf.Bytes(), os.FileMode(0644))
+	err := ioutil.WriteFile(filepath, buf.Bytes(), os.FileMode(0o644))
 	if err != nil {
 		o.Errorf("error writing file %q: %v", filepath, err)
 	}
@@ -222,7 +223,7 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 }
 
 func createDir(o *Output, dir string) {
-	err := os.MkdirAll(dir, 0700)
+	err := os.MkdirAll(dir, 0o700)
 	if err != nil {
 		o.Errorf("error creating directory %q: %v", dir, err)
 	}
@@ -254,11 +255,53 @@ func removeAllFilesInDir(o *Output, dir string) {
 }
 
 func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
+	// TODO: this assumes go.mod is in current directory, it might be in a parent
+	goModDir, err := os.Getwd()
+	if err != nil {
+		o.Errorf("error checking current directory: %v", err)
+	}
+
+	origGoModText, err := ioutil.ReadFile(filepath.Join(goModDir, "go.mod"))
+	if err != nil {
+		o.Errorf("error reading go.mod: %v", err)
+	}
+	origLines := bytes.SplitAfter(origGoModText, []byte("\n"))
+
+	// Figure out current module name
+	// TODO: do we already have it somewhere?
+	var moduleName string
+	for _, line := range origLines {
+		if bytes.HasPrefix(line, []byte("module")) {
+			// TODO: is the module line guaranteed to have this syntax?
+			moduleName = string(bytes.Fields(line)[1])
+			break
+		}
+	}
+	if moduleName == "" {
+		o.Errorf("go.mod had no module line")
+	}
+
+	newLines := [][]byte{
+		[]byte("module gomacro.imports/" + pkgpath + "\n"),
+		// Replace the current module with the right directory
+		[]byte("replace " + moduleName + " => " + goModDir + "\n"),
+	}
+
+	// Copy over the replaces, since they only apply when in the main module
+	for _, line := range origLines {
+		// TODO: this doesn't handle block syntax e.g. replace ( ... )
+		if bytes.HasPrefix(line, []byte("replace")) {
+			newLines = append(newLines, line)
+		}
+	}
+	newGoModText := bytes.Join(newLines, nil)
+
 	gomod := paths.Subdir(dir, "go.mod")
-	err := ioutil.WriteFile(gomod, []byte("module gomacro.imports/"+pkgpath+"\n"), os.FileMode(0644))
+	err = ioutil.WriteFile(gomod, newGoModText, os.FileMode(0o644))
 	if err != nil {
 		o.Errorf("error writing file %q: %v", gomod, err)
 	}
+
 	return gomod
 }
 
