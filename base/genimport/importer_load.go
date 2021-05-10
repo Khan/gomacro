@@ -34,8 +34,6 @@ func (imp *Importer) Load(pkgpath string, enableModule bool) (p *types.Package, 
 		return importer.Default().Import(pkgpath)
 	}
 
-	imp.output.Debugf("looking for package %q ...", pkgpath)
-
 	defer func() {
 		if p == nil && err == nil {
 			r := recover()
@@ -51,15 +49,23 @@ func (imp *Importer) Load(pkgpath string, enableModule bool) (p *types.Package, 
 	// Go >= 1.14 requires a valid go.mod file in the directory used for packages.Config.Dir
 	dir := computeImportDir(o, pkgpath, ImPlugin)
 	createDir(o, dir)
+	removeAllFilesInDir(o, dir)
 	createPluginGoModFile(o, pkgpath, dir)
 
+	env := environForCompiler(enableModule)
+
+	// Go >= 1.16 usually requires running "go get ..." before "go list ..."
+	// to start updating go.mod
+	if err := runGoGetIfNeeded(o, pkgpath, dir, env); err != nil {
+		return nil, err
+	}
+
 	cfg := packages.Config{
-		Mode: packages.NeedName | packages.NeedTypes | packages.NeedImports,
-		Env:  environForCompiler(enableModule),
+		Mode: packages.NeedName | packages.NeedTypes | packages.NeedImports | packages.NeedModule,
+		Env:  env,
 		Dir:  dir,
 		Logf: nil, // imp.output.Debugf,
 	}
-
 	list, err := packages.Load(&cfg, "pattern="+pkgpath)
 	if err != nil {
 		return nil, err
