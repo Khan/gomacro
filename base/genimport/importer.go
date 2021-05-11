@@ -18,6 +18,7 @@ package genimport
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/build"
 	"go/types"
@@ -270,15 +271,46 @@ func removeAllFilesInDirExcept(o *Output, dir string, except_list []string) {
 }
 
 func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
-	// TODO: this assumes go.mod is in current directory, it might be in a parent
-	goModDir, err := os.Getwd()
-	if err != nil {
-		o.Errorf("error checking current directory: %v", err)
+	o.Debugf("createPluginGoModFile v0.3 %s %s", pkgpath, dir)
+	newLines := [][]byte{
+		[]byte("module gomacro.imports/" + pkgpath + "\n"),
 	}
 
-	origGoModText, err := ioutil.ReadFile(filepath.Join(goModDir, "go.mod"))
+	newLines = append(newLines, goModReplacementDirectives(o)...)
+
+	newGoModText := bytes.Join(newLines, nil)
+
+	o.Debugf("Writing: %s", newGoModText)
+
+	gomod := paths.Subdir(dir, "go.mod")
+	err := ioutil.WriteFile(gomod, newGoModText, os.FileMode(0o644))
+	if err != nil {
+		o.Errorf("error writing file %q: %v", gomod, err)
+	}
+
+	return gomod
+}
+
+func goModReplacementDirectives(o *Output) [][]byte {
+	var replacementDirectives [][]byte
+
+	// TODO: we might be importing a path that is not a subdirectory as well
+	cwd, err := os.Getwd()
+	if err != nil {
+		o.Errorf("error finding cwd: %v", err)
+		return [][]byte{}
+	}
+
+	goModFile, err := findGoMod(cwd)
+	if err != nil {
+		o.Errorf("error finding go.mod: %v", err)
+		return [][]byte{}
+	}
+
+	origGoModText, err := ioutil.ReadFile(goModFile)
 	if err != nil {
 		o.Errorf("error reading go.mod: %v", err)
+		return [][]byte{}
 	}
 	origLines := bytes.SplitAfter(origGoModText, []byte("\n"))
 
@@ -296,28 +328,43 @@ func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
 		o.Errorf("go.mod had no module line")
 	}
 
-	newLines := [][]byte{
-		[]byte("module gomacro.imports/" + pkgpath + "\n"),
-		// Replace the current module with the right directory
-		[]byte("replace " + moduleName + " => " + goModDir + "\n"),
-	}
+	// Replace the current module with the right directory
+	replacementDirectives = append(replacementDirectives, []byte("replace "+moduleName+" => "+cwd+"\n"))
 
 	// Copy over the replaces, since they only apply when in the main module
 	for _, line := range origLines {
 		// TODO: this doesn't handle block syntax e.g. replace ( ... )
 		if bytes.HasPrefix(line, []byte("replace")) {
-			newLines = append(newLines, line)
+			replacementDirectives = append(replacementDirectives, line)
 		}
 	}
-	newGoModText := bytes.Join(newLines, nil)
+	return replacementDirectives
+}
 
-	gomod := paths.Subdir(dir, "go.mod")
-	err = ioutil.WriteFile(gomod, newGoModText, os.FileMode(0o644))
-	if err != nil {
-		o.Errorf("error writing file %q: %v", gomod, err)
+var noGoModOnPath = errors.New("no go.mod file on path")
+
+func findGoMod(d string) (string, error) {
+	dir := d
+	for {
+		if rel, err := filepath.Rel("/", dir); err != nil || rel == "." {
+			break
+		}
+		maybeGoMod := filepath.Join(dir, "go.mod")
+		if exists(maybeGoMod) {
+			return maybeGoMod, nil
+		}
+		dir = filepath.Dir(dir)
 	}
+	return "", noGoModOnPath
+}
 
-	return gomod
+func exists(name string) bool {
+	if _, err := os.Stat(name); err != nil {
+		if os.IsNotExist(err) {
+			return false
+		}
+	}
+	return true
 }
 
 func packageSanitizedName(path string) string {
