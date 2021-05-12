@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	r "reflect"
+	"strings"
 
 	"github.com/cosmos72/gomacro/base/output"
 	"github.com/cosmos72/gomacro/base/paths"
@@ -271,16 +272,15 @@ func removeAllFilesInDirExcept(o *Output, dir string, except_list []string) {
 }
 
 func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
-	o.Debugf("createPluginGoModFile v0.3 %s %s", pkgpath, dir)
 	newLines := [][]byte{
 		[]byte("module gomacro.imports/" + pkgpath + "\n"),
 	}
 
-	newLines = append(newLines, goModReplacementDirectives(o)...)
+	if localpath, ok := local(o, pkgpath); ok {
+		newLines = append(newLines, goModReplacementDirectives(o, localpath)...)
+	}
 
 	newGoModText := bytes.Join(newLines, nil)
-
-	o.Debugf("Writing: %s", newGoModText)
 
 	gomod := paths.Subdir(dir, "go.mod")
 	err := ioutil.WriteFile(gomod, newGoModText, os.FileMode(0o644))
@@ -291,17 +291,33 @@ func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
 	return gomod
 }
 
-func goModReplacementDirectives(o *Output) [][]byte {
-	var replacementDirectives [][]byte
-
-	// TODO: we might be importing a path that is not a subdirectory as well
+// local returns a localized path for the package if it is local, as well as a
+// boolean indicating if it was found
+func local(o *Output, pkgpath string) (string, bool) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		o.Errorf("error finding cwd: %v", err)
-		return [][]byte{}
+		return "", false
+	}
+	// Hacky way of determining if we're running gomacro from a directory that
+	// likely shares a go.mod file with the pkgpath. It assumes the both the
+	// cwd and module location will include the pattern 'owner/project', which
+	// is often true.
+	// TODO: find a better way to determine if it's local
+	modParts := strings.Split(pkgpath, "/")
+	if len(modParts) > 2 &&
+		strings.Contains(strings.ToLower(cwd), strings.ToLower(strings.Join(modParts[1:3], "/"))) {
+		return cwd, true
 	}
 
-	goModFile, err := findGoMod(cwd)
+	return "", false
+}
+
+// goModReplacementDirectives will create the replacement directives associated
+// with a module that can be found locally, for the purpose of use in a
+// gomacro.imports mod file.
+func goModReplacementDirectives(o *Output, localpath string) [][]byte {
+	goModDir, goModFile, err := findGoMod(localpath)
 	if err != nil {
 		o.Errorf("error finding go.mod: %v", err)
 		return [][]byte{}
@@ -315,7 +331,7 @@ func goModReplacementDirectives(o *Output) [][]byte {
 	origLines := bytes.SplitAfter(origGoModText, []byte("\n"))
 
 	// Figure out current module name
-	// TODO: do we already have it somewhere?
+	// TODO: Could we use github.com/golang/mod to parse this?
 	var moduleName string
 	for _, line := range origLines {
 		if bytes.HasPrefix(line, []byte("module")) {
@@ -329,11 +345,14 @@ func goModReplacementDirectives(o *Output) [][]byte {
 	}
 
 	// Replace the current module with the right directory
-	replacementDirectives = append(replacementDirectives, []byte("replace "+moduleName+" => "+cwd+"\n"))
+	replacementDirectives := [][]byte{
+		[]byte("replace "+moduleName+" => "+goModDir+"\n"),
+	}
 
 	// Copy over the replaces, since they only apply when in the main module
 	for _, line := range origLines {
 		// TODO: this doesn't handle block syntax e.g. replace ( ... )
+		// TODO: this doesn't work if the replace directives found are themselves localized
 		if bytes.HasPrefix(line, []byte("replace")) {
 			replacementDirectives = append(replacementDirectives, line)
 		}
@@ -343,7 +362,7 @@ func goModReplacementDirectives(o *Output) [][]byte {
 
 var noGoModOnPath = errors.New("no go.mod file on path")
 
-func findGoMod(d string) (string, error) {
+func findGoMod(d string) (string, string, error) {
 	dir := d
 	for {
 		if rel, err := filepath.Rel("/", dir); err != nil || rel == "." {
@@ -351,11 +370,11 @@ func findGoMod(d string) (string, error) {
 		}
 		maybeGoMod := filepath.Join(dir, "go.mod")
 		if exists(maybeGoMod) {
-			return maybeGoMod, nil
+			return dir, maybeGoMod, nil
 		}
 		dir = filepath.Dir(dir)
 	}
-	return "", noGoModOnPath
+	return "", "", noGoModOnPath
 }
 
 func exists(name string) bool {
