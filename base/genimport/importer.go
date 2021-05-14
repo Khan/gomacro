@@ -18,13 +18,15 @@ package genimport
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/build"
 	"go/types"
+	"golang.org/x/mod/modfile"
 	"io/ioutil"
 	"os"
-	"path/filepath"
+	"os/exec"
 	r "reflect"
 	"strings"
 
@@ -276,8 +278,12 @@ func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
 		[]byte("module gomacro.imports/" + pkgpath + "\n"),
 	}
 
-	if localpath, ok := local(o, pkgpath); ok {
-		newLines = append(newLines, goModReplacementDirectives(o, localpath)...)
+	// TODO: Figure out a better way to guess the dir
+	if pkgModFileInfo, err := getModuleFileInfo("."); err == nil &&
+		strings.Contains(strings.ToLower(pkgpath), strings.ToLower(pkgModFileInfo.Path)) {
+
+		o.Debugf("Importing %s from local %s", pkgpath, pkgModFileInfo.GoMod)
+		newLines = append(newLines, goModReplacementDirectives(o, pkgModFileInfo)...)
 	}
 
 	newGoModText := bytes.Join(newLines, nil)
@@ -291,99 +297,67 @@ func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
 	return gomod
 }
 
-// local returns a localized path for the package if it is local, as well as a
-// boolean indicating if it was found
-func local(o *Output, pkgpath string) (string, bool) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		o.Errorf("error finding cwd: %v", err)
-		return "", false
-	}
-	// Hacky way of determining if we're running gomacro from a directory that
-	// likely shares a go.mod file with the pkgpath. It assumes the both the
-	// cwd and module location will include the pattern 'owner/project', which
-	// is often true.
-	// TODO: find a better way to determine if it's local
-	modParts := strings.Split(pkgpath, "/")
-	if len(modParts) > 2 &&
-		strings.Contains(strings.ToLower(cwd), strings.ToLower(strings.Join(modParts[1:3], "/"))) {
-		return cwd, true
-	}
-
-	return "", false
-}
-
 // goModReplacementDirectives will create the replacement directives associated
 // with a module that can be found locally, for the purpose of use in a
 // gomacro.imports mod file.
-func goModReplacementDirectives(o *Output, localpath string) [][]byte {
-	goModDir, goModFile, err := findGoMod(localpath)
+func goModReplacementDirectives(o *Output, pkgModFileInfo modInfo) [][]byte {
+	m, err := getModuleFile(pkgModFileInfo)
 	if err != nil {
-		o.Errorf("error finding go.mod: %v", err)
+		o.Errorf("error getting go.mod", err)
 		return [][]byte{}
-	}
-
-	origGoModText, err := ioutil.ReadFile(goModFile)
-	if err != nil {
-		o.Errorf("error reading go.mod: %v", err)
-		return [][]byte{}
-	}
-	origLines := bytes.SplitAfter(origGoModText, []byte("\n"))
-
-	// Figure out current module name
-	// TODO: Could we use github.com/golang/mod to parse this?
-	var moduleName string
-	for _, line := range origLines {
-		if bytes.HasPrefix(line, []byte("module")) {
-			// TODO: is the module line guaranteed to have this syntax?
-			moduleName = string(bytes.Fields(line)[1])
-			break
-		}
-	}
-	if moduleName == "" {
-		o.Errorf("go.mod had no module line")
 	}
 
 	// Replace the current module with the right directory
 	replacementDirectives := [][]byte{
-		[]byte("replace "+moduleName+" => "+goModDir+"\n"),
+		[]byte("replace "+ pkgModFileInfo.Path+" => " + pkgModFileInfo.Dir + "\n"),
 	}
 
-	// Copy over the replaces, since they only apply when in the main module
-	for _, line := range origLines {
-		// TODO: this doesn't handle block syntax e.g. replace ( ... )
-		// TODO: this doesn't work if the replace directives found are themselves localized
-		if bytes.HasPrefix(line, []byte("replace")) {
-			replacementDirectives = append(replacementDirectives, line)
-		}
+	for _, repplaceDirective := range m.Replace {
+		// TODO: this doesn't work if the replace directives found are themselves local to the repo
+		replacementDirectives = append(replacementDirectives,
+			[]byte("replace " + repplaceDirective.Old.Path + " => " +
+				repplaceDirective.New.Path + " " + repplaceDirective.New.Version + "\n"))
 	}
+
 	return replacementDirectives
 }
 
-var noGoModOnPath = errors.New("no go.mod file on path")
-
-func findGoMod(d string) (string, string, error) {
-	dir := d
-	for {
-		if rel, err := filepath.Rel("/", dir); err != nil || rel == "." {
-			break
-		}
-		maybeGoMod := filepath.Join(dir, "go.mod")
-		if exists(maybeGoMod) {
-			return dir, maybeGoMod, nil
-		}
-		dir = filepath.Dir(dir)
-	}
-	return "", "", noGoModOnPath
+type modInfo struct {
+	Path      string `json:"Path"`
+	Dir       string `json:"Dir"`
+	GoMod     string `json:"GoMod"`
+	GoVersion string `json:"GoVersion"`
+	Main      bool   `json:"Main"`
 }
 
-func exists(name string) bool {
-	if _, err := os.Stat(name); err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
+func getModuleFile(i modInfo) (*modfile.File, error) {
+	raw, err := ioutil.ReadFile(i.GoMod)
+	if err != nil {
+		return nil, fmt.Errorf("reading go.mod file: %w", err)
 	}
-	return true
+
+	return modfile.Parse("go.mod", raw, nil)
+}
+
+func getModuleFileInfo(dir string) (modInfo, error) {
+	cmd := exec.Command("go", "list", "-m", "-json", "-f", "{{.GoMod}}")
+	cmd.Dir = dir
+
+	raw, err := cmd.CombinedOutput()
+	if err != nil {
+		return modInfo{}, fmt.Errorf("command go list: %w: %s", err, string(raw))
+	}
+
+	var v modInfo
+	err = json.Unmarshal(raw, &v)
+	if err != nil {
+		return modInfo{}, fmt.Errorf("unmarshaling error: %w: %s", err, string(raw))
+	}
+
+	if v.GoMod == "" {
+		return modInfo{}, errors.New("working directory is not part of a module")
+	}
+	return v, nil
 }
 
 func packageSanitizedName(path string) string {
