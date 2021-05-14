@@ -27,6 +27,7 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	r "reflect"
 	"strings"
 
@@ -278,9 +279,13 @@ func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
 		[]byte("module gomacro.imports/" + pkgpath + "\n"),
 	}
 
-	// TODO: Figure out a better way to guess the dir
+	// Attempt to use the local module if present.
+ 	// This only works if the import shares a mod file with current working
+	// directory, because we only know to guess "." for the local location.
+	// TODO: Find a way to support imports from local disk that aren't in
+	//  the cwd project.
 	if pkgModFileInfo, err := getModuleFileInfo("."); err == nil &&
-		strings.Contains(strings.ToLower(pkgpath), strings.ToLower(pkgModFileInfo.Path)) {
+		(pkgpath == pkgModFileInfo.Path || strings.HasPrefix(pkgpath, pkgModFileInfo.Path + "/")) {
 
 		o.Debugf("importing %s from local %s", pkgpath, pkgModFileInfo.GoMod)
 		newLines = append(newLines, goModReplacementDirectives(o, pkgModFileInfo)...)
@@ -308,18 +313,29 @@ func goModReplacementDirectives(o *Output, pkgModFileInfo modInfo) [][]byte {
 	}
 
 	// Replace the current module with the right directory
-	replacementDirectives := [][]byte{
+	replaceDirectives := [][]byte{
 		[]byte("replace "+ pkgModFileInfo.Path+" => " + pkgModFileInfo.Dir + "\n"),
 	}
 
-	for _, repplaceDirective := range m.Replace {
-		// TODO: this doesn't work if the replace directives found are themselves local to the repo
-		replacementDirectives = append(replacementDirectives,
-			[]byte("replace " + repplaceDirective.Old.Path + " => " +
-				repplaceDirective.New.Path + " " + repplaceDirective.New.Version + "\n"))
+	// Copy the replace directives from the imported mod, so the functionality
+	// remains similar.
+	for _, replaceDirective := range m.Replace {
+		// If the replace directive is to the local disk but not absolute,
+		// point to the correctly location.
+		if modfile.IsDirectoryPath(replaceDirective.New.Path) &&
+			!filepath.IsAbs(replaceDirective.New.Path) {
+
+			replaceDirectives = append(replaceDirectives,
+				[]byte("replace " + replaceDirective.Old.Path + " => " +
+					filepath.Join(pkgModFileInfo.Dir, replaceDirective.New.Path) + "\n"))
+		} else {
+			replaceDirectives = append(replaceDirectives,
+				[]byte("replace " + replaceDirective.Old.Path + " => " +
+					replaceDirective.New.Path + " " + replaceDirective.New.Version + "\n"))
+		}
 	}
 
-	return replacementDirectives
+	return replaceDirectives
 }
 
 type modInfo struct {
