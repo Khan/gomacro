@@ -340,6 +340,7 @@ func getModuleFile(i modInfo) (*modfile.File, error) {
 }
 
 func getModuleFileInfo(dir string) (modInfo, error) {
+	// https://github.com/golang/go/issues/44753#issuecomment-790089020
 	cmd := exec.Command("go", "list", "-m", "-json", "-f", "{{.GoMod}}")
 	cmd.Dir = dir
 
