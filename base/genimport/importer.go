@@ -282,7 +282,7 @@ func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
 	if pkgModFileInfo, err := getModuleFileInfo("."); err == nil &&
 		strings.Contains(strings.ToLower(pkgpath), strings.ToLower(pkgModFileInfo.Path)) {
 
-		o.Debugf("Importing %s from local %s", pkgpath, pkgModFileInfo.GoMod)
+		o.Debugf("importing %s from local %s", pkgpath, pkgModFileInfo.GoMod)
 		newLines = append(newLines, goModReplacementDirectives(o, pkgModFileInfo)...)
 	}
 
