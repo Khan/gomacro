@@ -201,8 +201,8 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 		createDir(o, dir)
 		removeAllFilesInDirExcept(o, dir, []string{"go.mod", "go.sum"})
 	}
-	filepath := computeImportFilename(o, pkgpath, mode)
-	filepath = paths.Subdir(dir, filepath)
+	f := computeImportFilename(o, pkgpath, mode)
+	f = paths.Subdir(dir, f)
 
 	buf := bytes.Buffer{}
 	isEmpty := writeImportFile(o, &buf, pkgpath, pkg, mode)
@@ -211,21 +211,21 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 		return ""
 	}
 
-	err := ioutil.WriteFile(filepath, buf.Bytes(), os.FileMode(0o644))
+	err := ioutil.WriteFile(f, buf.Bytes(), os.FileMode(0o644))
 	if err != nil {
-		o.Errorf("error writing file %q: %v", filepath, err)
+		o.Errorf("error writing file %q: %v", f, err)
 	}
 	switch mode {
 	case ImBuiltin, ImThirdParty:
-		o.Warnf("created file %q, recompile gomacro to use it", filepath)
+		o.Warnf("created file %q, recompile gomacro to use it", f)
 	case ImInception:
-		o.Warnf("created file %q, recompile %s to use it", filepath, pkgpath)
+		o.Warnf("created file %q, recompile %s to use it", f, pkgpath)
 	case ImPlugin:
 		// if needed, go.mod file was created already by Importer.Load()
 		env := environForCompiler(enableModule)
 		runGoModTidyIfNeeded(o, pkgpath, dir, env)
 	}
-	return filepath
+	return f
 }
 
 func createDir(o *Output, dir string) {
@@ -267,9 +267,9 @@ func removeAllFilesInDirExcept(o *Output, dir string, except_list []string) {
 		if name == "" {
 			continue
 		}
-		filepath := paths.Subdir(dir, name)
-		if err := os.Remove(filepath); err != nil {
-			o.Errorf("error removing file %q: %v", filepath, err)
+		f := paths.Subdir(dir, name)
+		if err := os.Remove(f); err != nil {
+			o.Errorf("error removing file %q: %v", f, err)
 		}
 	}
 }
