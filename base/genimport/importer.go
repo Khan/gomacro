@@ -18,12 +18,18 @@ package genimport
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"go/build"
 	"go/types"
+	"golang.org/x/mod/modfile"
 	"io/ioutil"
 	"os"
+	"os/exec"
+	"path/filepath"
 	r "reflect"
+	"strings"
 
 	"github.com/cosmos72/gomacro/base/output"
 	"github.com/cosmos72/gomacro/base/paths"
@@ -195,8 +201,8 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 		createDir(o, dir)
 		removeAllFilesInDirExcept(o, dir, []string{"go.mod", "go.sum"})
 	}
-	filepath := computeImportFilename(o, pkgpath, mode)
-	filepath = paths.Subdir(dir, filepath)
+	f := computeImportFilename(o, pkgpath, mode)
+	f = paths.Subdir(dir, f)
 
 	buf := bytes.Buffer{}
 	isEmpty := writeImportFile(o, &buf, pkgpath, pkg, mode)
@@ -205,25 +211,25 @@ func createImportFile(o *Output, pkgpath string, pkg *types.Package, mode Import
 		return ""
 	}
 
-	err := ioutil.WriteFile(filepath, buf.Bytes(), os.FileMode(0644))
+	err := ioutil.WriteFile(f, buf.Bytes(), os.FileMode(0o644))
 	if err != nil {
-		o.Errorf("error writing file %q: %v", filepath, err)
+		o.Errorf("error writing file %q: %v", f, err)
 	}
 	switch mode {
 	case ImBuiltin, ImThirdParty:
-		o.Warnf("created file %q, recompile gomacro to use it", filepath)
+		o.Warnf("created file %q, recompile gomacro to use it", f)
 	case ImInception:
-		o.Warnf("created file %q, recompile %s to use it", filepath, pkgpath)
+		o.Warnf("created file %q, recompile %s to use it", f, pkgpath)
 	case ImPlugin:
 		// if needed, go.mod file was created already by Importer.Load()
 		env := environForCompiler(enableModule)
 		runGoModTidyIfNeeded(o, pkgpath, dir, env)
 	}
-	return filepath
+	return f
 }
 
 func createDir(o *Output, dir string) {
-	err := os.MkdirAll(dir, 0700)
+	err := os.MkdirAll(dir, 0o700)
 	if err != nil {
 		o.Errorf("error creating directory %q: %v", dir, err)
 	}
@@ -261,20 +267,123 @@ func removeAllFilesInDirExcept(o *Output, dir string, except_list []string) {
 		if name == "" {
 			continue
 		}
-		filepath := paths.Subdir(dir, name)
-		if err := os.Remove(filepath); err != nil {
-			o.Errorf("error removing file %q: %v", filepath, err)
+		f := paths.Subdir(dir, name)
+		if err := os.Remove(f); err != nil {
+			o.Errorf("error removing file %q: %v", f, err)
 		}
 	}
 }
 
 func createPluginGoModFile(o *Output, pkgpath string, dir string) string {
+	file := modfile.File{}
+	err := file.AddModuleStmt("gomacro.imports/" + pkgpath)
+	if err != nil {
+		o.Errorf("error setting module in go.mod", err)
+	}
+
+	// Attempt to use the local module if present.
+	// This only works if the import shares a mod file with current working
+	// directory, because we only know to guess "." for the local location.
+	// TODO: Find a way to support imports from local disk that aren't in
+	//  the cwd project.
+	if pkgModFileInfo, err := getModuleFileInfo("."); err == nil &&
+		(pkgpath == pkgModFileInfo.Path || strings.HasPrefix(pkgpath, pkgModFileInfo.Path+"/")) {
+
+		o.Debugf("importing %s from local %s", pkgpath, pkgModFileInfo.GoMod)
+		goModReplaceDirectives(o, pkgModFileInfo, file)
+	}
+
 	gomod := paths.Subdir(dir, "go.mod")
-	err := ioutil.WriteFile(gomod, []byte("module gomacro.imports/"+pkgpath+"\n"), os.FileMode(0644))
+
+	format, err := file.Format()
+	if err != nil {
+		o.Debugf("error producing go.mod %v", err)
+		return ""
+	}
+
+	err = ioutil.WriteFile(gomod, format, os.FileMode(0o644))
 	if err != nil {
 		o.Errorf("error writing file %q: %v", gomod, err)
+		return ""
 	}
+
 	return gomod
+}
+
+// goModReplaceDirectives will create the replacement directives associated
+// with a module that can be found locally, for the purpose of use in a
+// gomacro.imports mod file.
+func goModReplaceDirectives(o *Output, pkgModFileInfo modInfo, dest modfile.File) {
+	m, err := getModuleFile(pkgModFileInfo)
+	if err != nil {
+		o.Errorf("error getting go.mod", err)
+		return
+	}
+
+	err = dest.AddReplace(pkgModFileInfo.Path, "", pkgModFileInfo.Dir, "")
+	if err != nil {
+		o.Debugf("error adding initial replace directive %v", err)
+		return
+	}
+
+	// Copy the replace directives from the imported mod, so the functionality
+	// remains similar.
+	for _, replaceDirective := range m.Replace {
+		newPath := replaceDirective.New.Path
+
+		// If the replace directive is to the local disk but not absolute,
+		// point to the correctly location.
+		if modfile.IsDirectoryPath(replaceDirective.New.Path) &&
+			!filepath.IsAbs(replaceDirective.New.Path) {
+
+			newPath = filepath.Join(pkgModFileInfo.Dir, replaceDirective.New.Path)
+		}
+
+		err := dest.AddReplace(replaceDirective.Old.Path, replaceDirective.Old.Version,
+			newPath, replaceDirective.New.Version)
+		if err != nil {
+			o.Debugf("error adding replace directive for %s, %v", replaceDirective.Old.String(), err)
+		}
+	}
+}
+
+type modInfo struct {
+	Path      string `json:"Path"`
+	Dir       string `json:"Dir"`
+	GoMod     string `json:"GoMod"`
+	GoVersion string `json:"GoVersion"`
+	Main      bool   `json:"Main"`
+}
+
+func getModuleFile(i modInfo) (*modfile.File, error) {
+	raw, err := ioutil.ReadFile(i.GoMod)
+	if err != nil {
+		return nil, fmt.Errorf("reading go.mod file: %w", err)
+	}
+
+	return modfile.Parse("go.mod", raw, nil)
+}
+
+func getModuleFileInfo(dir string) (modInfo, error) {
+	// https://github.com/golang/go/issues/44753#issuecomment-790089020
+	cmd := exec.Command("go", "list", "-m", "-json", "-f", "{{.GoMod}}")
+	cmd.Dir = dir
+
+	raw, err := cmd.CombinedOutput()
+	if err != nil {
+		return modInfo{}, fmt.Errorf("command go list: %w: %s", err, string(raw))
+	}
+
+	var v modInfo
+	err = json.Unmarshal(raw, &v)
+	if err != nil {
+		return modInfo{}, fmt.Errorf("unmarshaling error: %w: %s", err, string(raw))
+	}
+
+	if v.GoMod == "" {
+		return modInfo{}, errors.New("working directory is not part of a module")
+	}
+	return v, nil
 }
 
 func packageSanitizedName(path string) string {
